@@ -276,14 +276,32 @@ export default function App() {
   }, []);
 
   // Looper handlers
-  const handleSelectInbuiltLoop = useCallback((loopId: string) => {
+  const handleSelectInbuiltLoop = useCallback(async (loopId: string) => {
     if (!controllerRef.current) return;
     const controller = controllerRef.current;
     const loopDef = INBUILT_LOOPS.find((l) => l.id === loopId);
     if (!loopDef) return;
 
     setSelectedInbuiltLoopId(loopId);
-    const track = buildInbuiltLoopTrack(controller.audioCtx, loopDef);
+
+    let track: TrackData;
+    if (loopId === 'inbuilt-loop-6') {
+      try {
+        const { fetchInbuiltLoopFromUrl } = await import('./audio/inbuiltLoops');
+        // Will try to fetch 'dembow-loop.mp3' from public directory
+        track = await fetchInbuiltLoopFromUrl(controller.audioCtx, loopDef, '/dembow-loop.mp3');
+      } catch (err) {
+        console.error('Failed to load custom dembow loop, falling back to synthetic:', err);
+        track = buildInbuiltLoopTrack(controller.audioCtx, loopDef);
+        setSyncAlert({
+          message: 'Could not find /dembow-loop.mp3 in public folder. Using synthesized version.',
+          type: 'warning',
+        });
+      }
+    } else {
+      track = buildInbuiltLoopTrack(controller.audioCtx, loopDef);
+    }
+
     controller.audioLooperEngine.loadLoop(track, 'AUTO');
     setLoopTrack(track);
 
@@ -296,10 +314,17 @@ export default function App() {
     }
 
     setLooperState(controller.audioLooperEngine.getState());
-    setSyncAlert({
-      message: `Loaded ${loopDef.name} (${loopDef.bpm} BPM) - Original audio intact`,
-      type: 'success',
-    });
+    if (loopId === 'inbuilt-loop-6' && track.artist === 'Imported') {
+       setSyncAlert({
+         message: `Loaded ${loopDef.name} (${loopDef.bpm} BPM) - Playing your original MP3 file perfectly synced!`,
+         type: 'success',
+       });
+    } else {
+       setSyncAlert({
+         message: `Loaded ${loopDef.name} (${loopDef.bpm} BPM) - Original audio intact`,
+         type: 'success',
+       });
+    }
   }, []);
 
   const handleLooperUpload = useCallback(async (file: File) => {

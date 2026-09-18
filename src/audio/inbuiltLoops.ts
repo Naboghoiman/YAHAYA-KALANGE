@@ -80,8 +80,71 @@ export const INBUILT_LOOPS: InbuiltLoopDefinition[] = [
     color: '#ec4899',
     description: '16 Beats (4 Bars) • Log Drum Bass, Rim Taps & Rolling Shaker',
     slotNumber: 5
+  },
+  {
+    id: 'inbuilt-loop-6',
+    name: 'Loop 6: Dembow Upload',
+    genre: 'Reggaeton / Dembow',
+    bpm: 96.0,
+    beats: 16,
+    durationSeconds: (16 * 60) / 96.0, // 10.0s
+    color: '#ef4444',
+    description: '16 Beats (4 Bars) • Custom Uploaded Dembow Beat (96 BPM)',
+    slotNumber: 6
   }
 ];
+
+export async function fetchInbuiltLoopFromUrl(
+  audioCtx: AudioContext,
+  loopDef: InbuiltLoopDefinition,
+  url: string
+): Promise<TrackData> {
+  const response = await fetch(url);
+  const arrayBuffer = await response.arrayBuffer();
+  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  
+  const sampleRate = audioBuffer.sampleRate;
+  
+  // Since it's a known inbuilt loop, we force its beat grid based on the known definition BPM
+  const bpm = loopDef.bpm;
+  const baseSamplesPerBeat = (sampleRate * 60) / bpm;
+  const totalBeats = loopDef.beats;
+
+  const beatSamples: number[] = [];
+  const isDownbeat: boolean[] = [];
+  const transientMarkers: number[] = [];
+
+  for (let b = 0; b < totalBeats; b++) {
+    const beatPos = Math.round(b * baseSamplesPerBeat);
+    if (beatPos >= audioBuffer.length) break;
+
+    beatSamples.push(beatPos);
+    isDownbeat.push(b % 4 === 0);
+    transientMarkers.push(beatPos);
+  }
+
+  return {
+    id: loopDef.id,
+    title: loopDef.name,
+    artist: 'Imported',
+    bpm: loopDef.bpm,
+    sampleRate,
+    duration: audioBuffer.duration,
+    audioBuffer: audioBuffer,
+    waveformReady: true,
+    beatGrid: {
+      bpm: loopDef.bpm,
+      samplesPerBeat: baseSamplesPerBeat,
+      firstDownbeatSample: 0,
+      beatStartSample: 0,
+      confidence: 100,
+      beatsPerBar: 4,
+      totalBeats: totalBeats,
+      beatSamples: beatSamples,
+      isDownbeat: isDownbeat,
+    }
+  };
+}
 
 /**
  * Builds an authentic, high-fidelity uncompressed AudioBuffer and TrackData
@@ -134,6 +197,9 @@ export function buildInbuiltLoopTrack(
         break;
       case 'inbuilt-loop-5': // Amapiano 92 BPM
         synthesizeAmapianoPattern(left, right, sampleRate, numFrames, beatStart, beatInBar, baseSamplesPerBeat);
+        break;
+      case 'inbuilt-loop-6': // Dembow 96 BPM
+        synthesizeDembowPattern(left, right, sampleRate, numFrames, beatStart, beatInBar, baseSamplesPerBeat);
         break;
       default:
         synthesizeAfrobeatPattern(left, right, sampleRate, numFrames, beatStart, beatInBar, baseSamplesPerBeat);
@@ -471,3 +537,40 @@ function synthesizeAmapianoPattern(
     renderShakerOrHat(left, right, sampleRate, numFrames, pos, 75, 0.24, s % 2 === 0 ? -0.2 : 0.2);
   }
 }
+
+// 6. Dembow Pattern (96 BPM)
+function synthesizeDembowPattern(
+  left: Float32Array,
+  right: Float32Array,
+  sampleRate: number,
+  numFrames: number,
+  beatStart: number,
+  beatInBar: number,
+  spb: number
+) {
+  // Heavy Kick on every beat
+  renderKick(left, right, sampleRate, numFrames, beatStart, 50, 100, 16, 0.95);
+
+  // Dembow Snare pattern: on 1.75 and 2.5 of every 2 beats
+  // Wait, beatInBar is 0, 1, 2, 3
+  // Beat 0: snare at 0.75
+  // Beat 1: snare at 0.50
+  // Beat 2: snare at 0.75
+  // Beat 3: snare at 0.50
+
+  const snareVol = 0.75;
+  if (beatInBar === 0 || beatInBar === 2) {
+    const s1 = Math.round(beatStart + spb * 0.75);
+    renderSnareOrRim(left, right, sampleRate, numFrames, s1, false, snareVol);
+  } else if (beatInBar === 1 || beatInBar === 3) {
+    const s2 = Math.round(beatStart + spb * 0.50);
+    renderSnareOrRim(left, right, sampleRate, numFrames, s2, false, snareVol);
+  }
+
+  // Basic hi-hat
+  for (let s = 0; s < 4; s++) {
+    const pos = Math.round(beatStart + (spb * s) / 4);
+    renderShakerOrHat(left, right, sampleRate, numFrames, pos, 70, s % 2 === 0 ? 0.3 : 0.15, 0);
+  }
+}
+

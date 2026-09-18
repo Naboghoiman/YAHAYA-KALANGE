@@ -273,22 +273,54 @@ export class DjDeck {
     const totalSamples = this.track.audioBuffer.length;
     let safeSample = Math.max(0, Math.min(totalSamples - 1, sample));
 
-    this.stopSource();
+    const now = this.audioCtx.currentTime;
+    const rate = this.getEffectivePlaybackRate();
+    const oldSource = this.sourceNode;
+
+    let when = startTime;
+    let actualSample = safeSample;
+
+    if (startTime < now) {
+      // If scheduled time was in the slight past due to execution delay, compensate sample position
+      const elapsedSec = now - startTime;
+      const missedSamples = elapsedSec * rate * this.track.sampleRate;
+      actualSample = Math.round(safeSample + missedSamples);
+      if (actualSample >= totalSamples && totalSamples > 0) {
+        actualSample = actualSample % totalSamples;
+      }
+      when = now;
+    }
+
+    // If an existing source is playing, smoothly hand off without audio dropout
+    if (oldSource) {
+      try {
+        if (when > now + 0.005) {
+          oldSource.stop(when);
+          setTimeout(() => {
+            try { oldSource.disconnect(); } catch {}
+          }, Math.max(100, Math.round((when - now + 0.1) * 1000)));
+        } else {
+          oldSource.stop();
+          oldSource.disconnect();
+        }
+      } catch {
+        // guard
+      }
+      this.sourceNode = null;
+    }
 
     this.sourceNode = this.audioCtx.createBufferSource();
     this.sourceNode.buffer = this.track.audioBuffer;
     this.sourceNode.loop = true;
     this.sourceNode.connect(this.eqLowNode);
 
-    const rate = this.getEffectivePlaybackRate();
-    const when = Math.max(this.audioCtx.currentTime, startTime);
     try {
       this.sourceNode.playbackRate.setValueAtTime(rate, when);
     } catch {
       // fallback
     }
 
-    const offsetSeconds = Math.max(0, Math.min(this.track.audioBuffer.duration - 0.001, safeSample / this.track.sampleRate));
+    const offsetSeconds = Math.max(0, Math.min(this.track.audioBuffer.duration - 0.001, actualSample / this.track.sampleRate));
 
     try {
       this.sourceNode.start(when, offsetSeconds);
@@ -298,8 +330,8 @@ export class DjDeck {
     }
 
     this.playStartTime = when;
-    this.playStartSample = safeSample;
-    this.currentSourceSample = safeSample;
+    this.playStartSample = actualSample;
+    this.currentSourceSample = actualSample;
     this.isPlaying = true;
     this.isPaused = false;
   }
@@ -362,10 +394,10 @@ export class DjDeck {
     const elapsedSeconds = now - this.playStartTime;
     const rate = this.getEffectivePlaybackRate();
     const sourceSamplesElapsed = elapsedSeconds * rate * this.track.sampleRate;
-    let sample = Math.round(this.playStartSample + sourceSamplesElapsed);
+    let sample = this.playStartSample + sourceSamplesElapsed;
 
     const totalSamples = this.track.audioBuffer.length;
-    if (sample >= totalSamples) {
+    if (sample >= totalSamples && totalSamples > 0) {
       // Loop or stop
       sample = sample % totalSamples;
     }

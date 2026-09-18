@@ -187,8 +187,11 @@ export class MasavuPhaseController {
     const masterSamplesPerBeat = masterGrid.samplesPerBeat > 0 ? masterGrid.samplesPerBeat : 22050;
     const slaveSamplesPerBeat = slaveGrid.samplesPerBeat > 0 ? slaveGrid.samplesPerBeat : 22050;
 
-    const masterBeatFloat = (masterCurrentSample - masterGrid.firstDownbeatSample) / masterSamplesPerBeat;
-    const slaveBeatFloat = (slaveCurrentSample - slaveGrid.firstDownbeatSample) / slaveSamplesPerBeat;
+    const masterAnchor = masterGrid.beatStartSample ?? masterGrid.firstDownbeatSample ?? 0;
+    const slaveAnchor = slaveGrid.beatStartSample ?? slaveGrid.firstDownbeatSample ?? 0;
+
+    const masterBeatFloat = (masterCurrentSample - masterAnchor) / masterSamplesPerBeat;
+    const slaveBeatFloat = (slaveCurrentSample - slaveAnchor) / slaveSamplesPerBeat;
 
     // 1 & 2. Calculate phase error: slaveBeatTime - masterBeatTime wrapped to [-0.5 beat, +0.5 beat]
     const rawBeatError = slaveBeatFloat - masterBeatFloat;
@@ -222,18 +225,18 @@ export class MasavuPhaseController {
       const beatsPassed = Math.abs(currentMasterBeatIndex - this.lastMasterBeatIndex);
       this.lastMasterBeatIndex = currentMasterBeatIndex;
 
-      if (absErrorMs > 10.0) {
+      if (absErrorMs > 0.5) {
         this.numberOfPersistentBadBeats = Math.min(20, this.numberOfPersistentBadBeats + beatsPassed);
       } else {
         this.numberOfPersistentBadBeats = 0;
       }
     }
 
-    // 3. DEADBAND: abs(error) <= 10 ms
+    // 3. DEADBAND: abs(error) <= 0.5 ms
     // = LOCKED
     // = correction 0
     // = PLL multiplier exactly 1.000000
-    if (absErrorMs <= 10.0) {
+    if (absErrorMs <= 0.5) {
       this.syncState = 'LOCKED';
       this.numberOfPersistentBadBeats = 0;
       this.integralAccumulator = 0.0; // Rule 8: clear integral inside deadband
@@ -250,7 +253,7 @@ export class MasavuPhaseController {
           phaseErrorMs,
           gridPhaseErrorMs,
           desiredGrooveOffsetMs: this.desiredGrooveOffsetMs,
-          isGrooveLocked: Math.abs(this.desiredGrooveOffsetMs) > 0.5 && absErrorMs <= 10.0,
+          isGrooveLocked: Math.abs(this.desiredGrooveOffsetMs) > 0.5 && absErrorMs <= 0.5,
           phaseErrorDegrees,
           masterBpm,
           slaveEffectiveBpm,
@@ -328,33 +331,35 @@ export class MasavuPhaseController {
       }
     }
 
-    // Check persistence requirement for small and medium errors
-    // Must persist for at least 2 consecutive beats before correction
-    if (this.numberOfPersistentBadBeats < 2) {
-      // Do not apply correction yet
-      this.syncState = 'LOCKED';
-      this.currentCorrectionRate *= 0.9;
-      if (Math.abs(this.currentCorrectionRate) < 0.0001) {
-        this.currentCorrectionRate = 0.0;
-      }
-
-      return {
-        pllMultiplier: 1.0,
-        telemetry: {
-          phaseErrorMs,
-          gridPhaseErrorMs,
-          desiredGrooveOffsetMs: this.desiredGrooveOffsetMs,
-          isGrooveLocked: Math.abs(this.desiredGrooveOffsetMs) > 0.5 && absErrorMs <= 10.0,
-          phaseErrorDegrees,
-          masterBpm,
-          slaveEffectiveBpm,
-          baseTempoMultiplier,
-          temporaryCorrectionPercent: 0.0,
-          numberOfPersistentBadBeats: this.numberOfPersistentBadBeats,
-          syncState: 'LOCKED',
-          reanchorCount: this.reanchorCount
+    // Check persistence requirement for large random jumps only,
+    // otherwise correct micro-drift immediately without waiting for bad beats.
+    if (absErrorMs > 100.0) {
+      if (this.numberOfPersistentBadBeats < 1) {
+        // Do not apply correction yet
+        this.syncState = 'LOCKED';
+        this.currentCorrectionRate *= 0.9;
+        if (Math.abs(this.currentCorrectionRate) < 0.0001) {
+          this.currentCorrectionRate = 0.0;
         }
-      };
+
+        return {
+          pllMultiplier: 1.0,
+          telemetry: {
+            phaseErrorMs,
+            gridPhaseErrorMs,
+            desiredGrooveOffsetMs: this.desiredGrooveOffsetMs,
+            isGrooveLocked: Math.abs(this.desiredGrooveOffsetMs) > 0.5 && absErrorMs <= 0.5,
+            phaseErrorDegrees,
+            masterBpm,
+            slaveEffectiveBpm,
+            baseTempoMultiplier,
+            temporaryCorrectionPercent: 0.0,
+            numberOfPersistentBadBeats: this.numberOfPersistentBadBeats,
+            syncState: 'LOCKED',
+            reanchorCount: this.reanchorCount
+          }
+        };
+      }
     }
 
     // 7. CORRECTION SIGN:
@@ -362,27 +367,25 @@ export class MasavuPhaseController {
     // slave early (phaseErrorMs > 0) -> temporarily slow slave down (negative correction)
     const sign = phaseErrorMs < 0 ? 1 : -1;
 
-    let maxRateLimit = 0.006; // Small error limit: 0.6%
-    let spreadBeats = 3.0;     // Spread over 2-4 beats
+    let maxRateLimit = 0.02; // Small error limit: 2%
+    let spreadBeats = 1.0;     // Spread over 1 beat
 
-    if (absErrorMs > 35.0 && absErrorMs <= 80.0) {
-      // 5. MEDIUM ERROR: 35–80 ms
-      // Maximum temporary rate correction = ±1.0%
-      // Correct smoothly over approximately 2 beats.
-      maxRateLimit = 0.010;
-      spreadBeats = 2.0;
+    if (absErrorMs > 35.0 && absErrorMs <= 100.0) {
+      // 5. MEDIUM ERROR: 35–100 ms
+      // Maximum temporary rate correction = ±4.0%
+      maxRateLimit = 0.040;
+      spreadBeats = 1.5;
     } else {
-      // 4. SMALL PERSISTENT ERROR: 10–35 ms
-      // Maximum correction = ±0.6%
-      // Spread correction smoothly over 2–4 beats.
-      maxRateLimit = 0.006;
-      spreadBeats = 3.0;
+      // 4. SMALL ERROR: 2.5–35 ms
+      // Maximum correction = ±2.0%
+      maxRateLimit = 0.020;
+      spreadBeats = 1.0;
     }
 
     // 8. INTEGRAL PROTECTION:
     // Proportional + anti-windup Integral
     // target proportional correction scales down toward 0 as error approaches deadband
-    const normalizedError = Math.min(1.0, (absErrorMs - 10.0) / 70.0);
+    const normalizedError = Math.min(1.0, (absErrorMs - 0.5) / 99.5);
     const targetProportional = sign * (normalizedError * maxRateLimit);
 
     this.integralAccumulator += sign * normalizedError * (dt / (spreadBeats * masterBeatPeriodSec)) * 0.002;

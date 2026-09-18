@@ -282,4 +282,30 @@ export class AudioLooperEngine {
 
     return true;
   }
+
+  public updateContinuousSync(masterDeck: DjDeck): void {
+    if (!this.loopTrack || !this.loopDeck.getTelemetry().isPlaying || this.syncedTo === null) return;
+    
+    const masterTrack = masterDeck.getTrack();
+    if (!masterTrack) return;
+    
+    const masterTel = masterDeck.getTelemetry();
+    if (!masterTel.isPlaying) return;
+    
+    const masterEffectiveBpm = masterTel.effectiveBpm > 20 ? masterTel.effectiveBpm : masterTrack.bpm;
+    
+    // Strict Lock: Do not wobble the phase. Calculate base exact multiplier required for tempo match.
+    const baseTargetMultiplier = masterEffectiveBpm / (this.loopTrack.bpm || 120);
+    const bakedMultiplier = this.loopDeck.getBaseTempoMultiplier();
+    
+    if (bakedMultiplier > 0) {
+       const dynamicRatio = baseTargetMultiplier / bakedMultiplier;
+       
+       // Only apply the dynamic rate change if the Master deck's core tempo changed 
+       // (e.g. user moved the pitch slider). Ignore microscopic jitter.
+       if (Math.abs(dynamicRatio - this.loopDeck.getDynamicRate()) > 0.0001) {
+           this.loopDeck.setDynamicPlaybackRate(dynamicRatio);
+       }
+    }
+  }
 }

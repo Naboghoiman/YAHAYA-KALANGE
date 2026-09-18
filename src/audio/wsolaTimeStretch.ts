@@ -146,10 +146,9 @@ export function timeStretchWsola(
       chosenInputPos = ((nominalRounded + bestOffset) % N + N) % N;
     }
 
-    // Overlap-add windowed grain
+    // Overlap-add windowed grain with wrap-around for seamless loop energy
     for (let k = 0; k < windowSize; k++) {
-      const outIdx = synthPos + k;
-      if (outIdx >= outputLength) break;
+      const outIdx = (synthPos + k) % outputLength;
 
       const inIdx = (chosenInputPos + k) % N;
       const w = hann[k];

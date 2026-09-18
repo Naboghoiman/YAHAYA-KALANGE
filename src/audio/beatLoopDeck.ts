@@ -15,6 +15,8 @@ export class BeatLoopDeck extends DjDeck {
   // Prepared loop playback tracking
   private playStartPreparedSec = 0;
   private currentTempoMultiplier = 1.0;
+  private dynamicRate = 1.0;
+  private bufferRoundingCompensation = 1.0;
 
   public configureMusicalLoop(
     startSample: number,
@@ -162,32 +164,55 @@ export class BeatLoopDeck extends DjDeck {
       (slaveSourceSample - this.loopStartSample) / sourceSampleRate;
     let preparedRelativeSec = sourceRelativeSec / safeMultiplier;
 
+    let when = targetOutputTime;
+
+    const now = this.audioCtx.currentTime;
+    if (targetOutputTime < now) {
+      // If scheduled time was in the slight past due to execution delay,
+      // we must compensate the start position inside the prepared buffer.
+      const elapsedSec = now - targetOutputTime;
+      // Since playback rate of the buffer is strictly 1.0, 
+      // the missed time in the prepared buffer is exactly elapsedSec.
+      preparedRelativeSec += elapsedSec;
+      when = now;
+    }
+
     const preparedDuration = preparedBuffer.duration;
     preparedRelativeSec =
       ((preparedRelativeSec % preparedDuration) + preparedDuration) %
       preparedDuration;
 
-    const when = Math.max(this.audioCtx.currentTime, targetOutputTime);
+    // Calculate compensation for fractional sample rounding in WSOLA or truncation.
+    // This allows the physical AudioBuffer to loop natively without drifting out of sync
+    // with the mathematical time grid of the master deck.
+    const trueSourceSamples = this.loopBeatCount * this.track.beatGrid.samplesPerBeat;
+    const exactTargetSamples = trueSourceSamples / safeMultiplier;
+    const actualSamples = preparedBuffer.length;
+    this.bufferRoundingCompensation = actualSamples > 0 ? actualSamples / exactTargetSamples : 1.0;
 
-    // Stop active source cleanly at scheduled transition time
+    // Stop active source cleanly
     if (this.sourceNode) {
       try {
-        this.sourceNode.stop(when);
+        if (when > now + 0.005) {
+          this.sourceNode.stop(when);
+        } else {
+          this.sourceNode.stop();
+        }
       } catch {
-        // ignore already stopped source
+        // ignore
       }
       this.sourceNode = null;
     }
 
-    // Create fresh BufferSource played at strictly playbackRate = 1.0
+    // Create fresh BufferSource
     const nextSource = this.audioCtx.createBufferSource();
     nextSource.buffer = preparedBuffer;
     nextSource.loop = true;
     nextSource.loopStart = 0;
     nextSource.loopEnd = preparedDuration;
 
-    // STRICT LOOPER RULE: playbackRate is always 1.0
-    nextSource.playbackRate.setValueAtTime(1.0, when);
+    // STRICT LOOPER RULE: Apply compensation invisibly to the Web Audio node so it loops perfectly in time
+    nextSource.playbackRate.setValueAtTime(this.bufferRoundingCompensation, when);
     nextSource.connect(this.eqLowNode);
 
     try {
@@ -203,6 +228,7 @@ export class BeatLoopDeck extends DjDeck {
     this.currentTempoMultiplier = safeMultiplier;
     this.baseTempoMultiplier = safeMultiplier;
     this.currentSourceSample = slaveSourceSample;
+    this.dynamicRate = 1.0;
 
     this.isPlaying = true;
     this.isPaused = false;
@@ -267,16 +293,45 @@ export class BeatLoopDeck extends DjDeck {
     if (loopDuration <= 0) return;
 
     const currentPreparedSec =
-      ((this.playStartPreparedSec + elapsedSeconds) % loopDuration +
+      ((this.playStartPreparedSec + (elapsedSeconds * this.dynamicRate)) % loopDuration +
         loopDuration) %
       loopDuration;
 
     // Map back to source coordinates for telemetry & sync calculations
     const sourceRelativeSec = currentPreparedSec * this.currentTempoMultiplier;
+    
     const sourceSample =
       this.loopStartSample +
-      Math.round(sourceRelativeSec * this.track.sampleRate);
+      (sourceRelativeSec * this.track.sampleRate);
 
     this.currentSourceSample = this.wrapIntoLoop(sourceSample);
+  }
+
+  public setDynamicPlaybackRate(rate: number): void {
+    if (!this.isPlaying || !this.sourceNode || !this.cachedPreparedBuffer) return;
+    if (Math.abs(this.dynamicRate - rate) < 0.0001) return;
+
+    const now = this.audioCtx.currentTime;
+    
+    // Save exactly where we are in the prepared buffer right now
+    const elapsedSeconds = Math.max(0, now - this.playStartTime);
+    const loopDuration = this.cachedPreparedBuffer.duration;
+    
+    if (loopDuration > 0) {
+      this.playStartPreparedSec = ((this.playStartPreparedSec + (elapsedSeconds * this.dynamicRate)) % loopDuration + loopDuration) % loopDuration;
+    }
+
+    this.dynamicRate = rate;
+    this.playStartTime = now;
+    
+    try {
+      this.sourceNode.playbackRate.setValueAtTime(rate * this.bufferRoundingCompensation, now);
+    } catch {
+      // guard
+    }
+  }
+
+  public getDynamicRate(): number {
+    return this.dynamicRate;
   }
 }

@@ -65,7 +65,7 @@ export interface Vdj8StyleSyncConfig {
 }
 
 const DEFAULT_CONFIG: Vdj8StyleSyncConfig = {
-  minLookaheadSeconds: 0.055,
+  minLookaheadSeconds: 0.10,
   kickSearchWindowBeats: 0.18,
   forceDownbeatForHalfDouble: true,
   decoderLatencyFrames: 0,
@@ -166,8 +166,10 @@ export class Vdj8StyleSyncEngine {
     const masterGrid = this.safeGrid(masterTrack.beatGrid, masterTrack.sampleRate, masterBpm);
     const slaveGrid = this.safeGrid(slaveTrack.beatGrid, slaveTrack.sampleRate, slaveBpm);
 
-    const masterBeatFloat = this.sampleToBeat(masterCurrentSourceSample, masterGrid);
-    const masterBeatPeriodSeconds = 60 / masterBpm;
+    const masterAnchor = masterGrid.beatStartSample ?? masterGrid.firstDownbeatSample ?? 0;
+    const masterSamplesPerBeat = masterGrid.samplesPerBeat > 0 ? masterGrid.samplesPerBeat : (masterTrack.sampleRate * 60) / masterBpm;
+    const masterBeatFloat = (masterCurrentSourceSample - masterAnchor) / masterSamplesPerBeat;
+    const masterEffectiveRate = Math.max(0.1, masterBpm / masterTrack.bpm);
     const masterBeatsPerBar = Math.max(1, masterGrid.beatsPerBar || 4);
 
     let quantizeMode: 'beat' | 'bar' = requestedMode;
@@ -177,15 +179,22 @@ export class Vdj8StyleSyncEngine {
 
     let targetMasterBeatIndex = this.nextMasterTargetBeat(
       masterBeatFloat,
-      masterBeatPeriodSeconds,
+      masterSamplesPerBeat / (masterEffectiveRate * masterTrack.sampleRate),
       masterBeatsPerBar,
       quantizeMode
     );
 
-    let secondsUntilTarget = (targetMasterBeatIndex - masterBeatFloat) * masterBeatPeriodSeconds;
+    let targetMasterSample = Math.round(masterAnchor + targetMasterBeatIndex * masterSamplesPerBeat);
+    let masterNearestTransient = this.findNearestTransientToBeat(masterTrack, targetMasterSample, masterSamplesPerBeat);
+    let effectiveTargetMasterSample = masterNearestTransient !== null ? masterNearestTransient : targetMasterSample;
+    
+    let secondsUntilTarget = Math.max(0, (effectiveTargetMasterSample - masterCurrentSourceSample) / (masterEffectiveRate * masterTrack.sampleRate));
     while (secondsUntilTarget < this.config.minLookaheadSeconds) {
       targetMasterBeatIndex += quantizeMode === 'bar' ? masterBeatsPerBar : 1;
-      secondsUntilTarget = (targetMasterBeatIndex - masterBeatFloat) * masterBeatPeriodSeconds;
+      targetMasterSample = Math.round(masterAnchor + targetMasterBeatIndex * masterSamplesPerBeat);
+      masterNearestTransient = this.findNearestTransientToBeat(masterTrack, targetMasterSample, masterSamplesPerBeat);
+      effectiveTargetMasterSample = masterNearestTransient !== null ? masterNearestTransient : targetMasterSample;
+      secondsUntilTarget = Math.max(0, (effectiveTargetMasterSample - masterCurrentSourceSample) / (masterEffectiveRate * masterTrack.sampleRate));
     }
 
     const targetOutputTime = audioContextCurrentTime + secondsUntilTarget;
@@ -217,13 +226,31 @@ export class Vdj8StyleSyncEngine {
 
     const selectedSlaveBeatSample = this.beatIndexToSample(targetSlaveBeatIndex, slaveGrid);
 
-    // DiscDJ Beat Phase Parity: strictly bypass groove matching and kick-snapping.
-    // finalSlaveSourceSample = selected grid-phase source sample
+    const nearestTransient = this.findNearestTransientToBeat(slaveTrack, selectedSlaveBeatSample, slaveGrid.samplesPerBeat);
     const finalSlaveBeatIndex = targetSlaveBeatIndex;
-    const slaveSourceSample = selectedSlaveBeatSample;
-    const kickSnapped = false;
-    const kickOffsetMs = 0;
-    const desiredGrooveOffsetMs = 0;
+    let slaveSourceSample = selectedSlaveBeatSample;
+    let kickSnapped = false;
+    let kickOffsetMs = 0;
+    let desiredGrooveOffsetMs = 0;
+
+    if (nearestTransient !== null) {
+      slaveSourceSample = nearestTransient;
+      kickSnapped = true;
+    }
+
+    // Calculate exactly what the grid phase error WILL be when these two transients are aligned
+    // so the phase controller maintains this offset instead of destroying it.
+    const slaveBeatsOffset = nearestTransient !== null 
+      ? (nearestTransient - selectedSlaveBeatSample) / slaveGrid.samplesPerBeat 
+      : 0;
+      
+    const masterBeatsOffset = masterNearestTransient !== null 
+      ? (masterNearestTransient - targetMasterSample) / masterSamplesPerBeat 
+      : 0;
+
+    const masterBeatPeriodMs = (60 / masterBpm) * 1000;
+    kickOffsetMs = slaveBeatsOffset * masterBeatPeriodMs;
+    desiredGrooveOffsetMs = (slaveBeatsOffset - masterBeatsOffset) * masterBeatPeriodMs;
 
     const totalLatencyFrames =
       this.config.decoderLatencyFrames +

@@ -11,7 +11,7 @@ import { Vdj8StyleLaunchPlan, Vdj8StyleSyncEngine } from './vdj8StyleSyncEngine'
 import { MasavuPhaseController, MasavuPhaseTelemetry } from './masavuPhaseController';
 import { AudioLooperEngine } from './audioLooperEngine';
 
-export class DjMasterController extends BaseDjMasterController {
+import { discDjStyleSync, DiscDjDeck } from './discDjStyleSync';import { DjDeck } from './djDeck';class DiscDjDeckWrapper implements DiscDjDeck {  constructor(private deck: DjDeck) {}    get originalBpm() { return this.deck.getTrack()?.bpm ?? 120.0; }    get beatPeriod() { return 60.0 / this.originalBpm; }    get beatStart() {     const track = this.deck.getTrack();    if (!track) return 0;    return (track.beatGrid.firstDownbeatSample ?? 0) / track.sampleRate;  }    getSpeed() {     return this.deck.getBaseTempoMultiplier();   }    setSpeed(speed: number) {    this.deck.setTempoFamilyLock(speed);  }    getCurrentPosition() {    const track = this.deck.getTrack();    if (!track) return 0;    return this.deck.getCurrentSourceSample() / track.sampleRate;  }    seekTo(positionSeconds: number) {    const track = this.deck.getTrack();    if (!track) return;    this.deck.seek(Math.round(positionSeconds * track.sampleRate));  }    isPlaying() {    return this.deck.getTelemetry().isPlaying;  }    start() {    this.deck.play();  }    setResetSpeedFlag(enabled: boolean) {    if (!enabled) {      this.deck.setJogPitchNudge(0);      this.deck.setPLLMultiplier(1.0);    }  }}export class DjMasterController extends BaseDjMasterController {
   public readonly vdj8StyleSyncEngine = new Vdj8StyleSyncEngine();
   public readonly masavuPhaseController = new MasavuPhaseController();
   public readonly audioLooperEngine: AudioLooperEngine;
@@ -79,19 +79,10 @@ export class DjMasterController extends BaseDjMasterController {
     const slaveTrack = slaveDeck.getTrack();
     if (!masterTrack || !slaveTrack) return null;
 
-    // DiscDJ Parity rule: if valid BPM/beat_start analysis is not ready, do not full-sync
-    if (!this.vdj8StyleSyncEngine.isGridValid(masterTrack.beatGrid) || !this.vdj8StyleSyncEngine.isGridValid(slaveTrack.beatGrid)) {
-      console.warn('[DiscDJ Sync] ANALYSIS_NOT_READY / SYNC_DEFERRED: grid not fully validated.');
-      return null;
-    }
-
     masterDeck.updateCurrentPosition();
     slaveDeck.updateCurrentPosition();
-
     const masterTelemetry = masterDeck.getTelemetry();
-    const slaveTelemetry = slaveDeck.getTelemetry();
 
-    // If there is no running reference clock, retain the original MASAVU cue behaviour.
     if (!masterTelemetry.isPlaying) {
       slaveDeck.setTempoFamilyLock(null);
       const fallback = super.triggerBeatPerfectSlaveStart(quantizeMode);
@@ -99,63 +90,25 @@ export class DjMasterController extends BaseDjMasterController {
       return fallback;
     }
 
-    const masterBpm = masterTelemetry.effectiveBpm > 20
-      ? masterTelemetry.effectiveBpm
-      : masterTrack.bpm;
+    const wrapperMaster = new DiscDjDeckWrapper(masterDeck as DjDeck);
+    const wrapperSlave = new DiscDjDeckWrapper(slaveDeck as DjDeck);
 
-    const plan = this.vdj8StyleSyncEngine.createLaunchPlan({
-      audioContextCurrentTime: this.audioCtx.currentTime,
-      outputSampleRate: this.audioCtx.sampleRate,
-      masterTrack,
-      slaveTrack,
-      masterCurrentSourceSample: masterDeck.getCurrentSourceSample(),
-      slaveCurrentSourceSample: slaveDeck.getCurrentSourceSample(),
-      masterEffectiveBpm: masterBpm,
-      slaveIsPlaying: slaveTelemetry.isPlaying,
-      quantizeMode
-    });
+    const audioBufferFrames = (this.audioCtx.baseLatency || (128 / this.audioCtx.sampleRate)) * this.audioCtx.sampleRate;
+    
+    discDjStyleSync(0, wrapperSlave, wrapperMaster, audioBufferFrames, this.audioCtx.sampleRate);
 
-    // The master is never tempo-family constrained by its slave.
-    masterDeck.setTempoFamilyLock(null);
-
-    // Prepare stable slave tempo before any start/re-anchor operation.
-    slaveDeck.setSync(true);
-    slaveDeck.setJogPitchNudge(0);
-    slaveDeck.setPLLMultiplier(1.0);
-    slaveDeck.setTempoFamilyLock(plan.baseTempoMultiplier);
-
-    // Keep the pitch control display coherent without allowing it to override sync tempo.
-    const neededPitchDelta = Math.abs(plan.baseTempoMultiplier - 1.0);
-    const currentRange = slaveDeck.getPitchRange();
-    if (neededPitchDelta > currentRange) {
-      slaveDeck.setPitchRange(Math.min(1.0, Math.max(0.16, neededPitchDelta * 1.05)));
-    }
+    const targetMultiplier = slaveDeck.getBaseTempoMultiplier();
     const effectiveRange = slaveDeck.getPitchRange();
     if (Number.isFinite(effectiveRange) && Math.abs(effectiveRange) > 1e-6) {
-      const pitchPct = (plan.baseTempoMultiplier - 1.0) / effectiveRange;
+      const pitchPct = (targetMultiplier - 1.0) / effectiveRange;
       slaveDeck.setPitchPercentage(Math.max(-1.0, Math.min(1.0, pitchPct)));
     }
-    slaveDeck.setTempoFamilyLock(plan.baseTempoMultiplier);
-    slaveDeck.setBaseTempoMultiplier(plan.baseTempoMultiplier);
 
-    if (slaveTelemetry.isPlaying) {
-      // One controlled re-anchor at a future master beat. No repeated seek loop.
-      slaveDeck.syncAlignToMaster(
-        plan.targetOutputTime,
-        plan.slaveSourceSample,
-        plan.baseTempoMultiplier
-      );
-    } else {
-      // Critical fix: start from the SELECTED matching slave beat/kick, not the
-      // arbitrary current read-head sample.
-      slaveDeck.play(plan.targetOutputTime, plan.slaveSourceSample);
-    }
-
+    slaveDeck.setSync(true);
     this.syncEngine.resetController();
     this.masavuPhaseController.reset();
-    this.masavuPhaseController.setDesiredGrooveOffsetMs(plan.desiredGrooveOffsetMs ?? 0);
-    this.vdj8LastSlaveStartPlan = plan;
-    return plan;
+    this.vdj8LastSlaveStartPlan = null;
+    return null;
   }
 
   public updatePhaseController(): MasavuPhaseTelemetry {
@@ -202,13 +155,23 @@ export class DjMasterController extends BaseDjMasterController {
       slaveGrid: slaveTrack.beatGrid,
       baseTempoMultiplier: slaveDeck.getBaseTempoMultiplier(),
       slaveEffectiveBpm: slaveTelemetry.effectiveBpm,
-      onScheduleReanchor: undefined // DiscDJ parity: no automatic re-anchors
+      onScheduleReanchor: () => {
+        if (slaveDeck.getSync() && masterTelemetry.isPlaying && slaveTelemetry.isPlaying) {
+          this.triggerBeatPerfectSlaveStart('beat');
+        }
+      }
     });
 
-    // DiscDJ parity test: phase controller is TELEMETRY ONLY.
-    // Do NOT apply PLL multiplier. Keep stable tempo.
-    slaveDeck.setPLLMultiplier(1.0);
-    slaveDeck.setJogPitchNudge(0);
+    // When SYNC is engaged, dynamically apply the PLL multiplier to maintain tight phase lock
+    // and prevent any clock drift over time.
+    if (slaveDeck.getSync() && masterTelemetry.isPlaying && slaveTelemetry.isPlaying) {
+      slaveDeck.setPLLMultiplier(result.pllMultiplier);
+    } else {
+      slaveDeck.setPLLMultiplier(1.0);
+    }
+    
+    // Also continuously sync the looper's dynamic rate to the master deck
+    this.audioLooperEngine.updateContinuousSync(masterDeck);
 
     return result.telemetry;
   }
