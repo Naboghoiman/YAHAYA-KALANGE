@@ -293,7 +293,8 @@ export class BeatLoopDeck extends DjDeck {
     if (loopDuration <= 0) return;
 
     const currentPreparedSec =
-      ((this.playStartPreparedSec + (elapsedSeconds * this.dynamicRate)) % loopDuration +
+      ((this.playStartPreparedSec + elapsedSeconds * this.dynamicRate) %
+        loopDuration +
         loopDuration) %
       loopDuration;
 
@@ -318,14 +319,19 @@ export class BeatLoopDeck extends DjDeck {
     const loopDuration = this.cachedPreparedBuffer.duration;
     
     if (loopDuration > 0) {
-      this.playStartPreparedSec = ((this.playStartPreparedSec + (elapsedSeconds * this.dynamicRate)) % loopDuration + loopDuration) % loopDuration;
+      this.playStartPreparedSec =
+        ((this.playStartPreparedSec +
+          elapsedSeconds * this.dynamicRate * this.bufferRoundingCompensation) %
+          loopDuration +
+          loopDuration) %
+        loopDuration;
     }
 
     this.dynamicRate = rate;
     this.playStartTime = now;
     
     try {
-      this.sourceNode.playbackRate.setValueAtTime(rate * this.bufferRoundingCompensation, now);
+      this.sourceNode.playbackRate.setValueAtTime(rate, now);
     } catch {
       // guard
     }

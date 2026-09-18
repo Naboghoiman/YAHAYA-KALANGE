@@ -217,16 +217,16 @@ export default function App() {
     }
   }, []);
 
-  // TRIGGER CLEAN-ROOM VDJ8 SYNC
-  const handleTriggerVdj8Sync = useCallback(() => {
+  // TRIGGER CLEAN-ROOM DISCDJ SYNC
+  const handleTriggerVdj8Sync = useCallback((_targetDeckId?: 'A' | 'B') => {
     if (!controllerRef.current) return;
     const plan = controllerRef.current.triggerBeatPerfectSlaveStart(quantizeMode) as Vdj8StyleLaunchPlan | null;
 
     if (plan) {
       setLastPlan(plan);
-      const slaveId = controllerRef.current.getMasterDeckId() === 'A' ? 'B' : 'A';
+      const slaveId = _targetDeckId ?? (controllerRef.current.getMasterDeckId() === 'A' ? 'B' : 'A');
       setSyncAlert({
-        message: `MASAVU Sync Locked on Deck ${slaveId}: Matched ${plan.familyFactor}x Tempo Family (${plan.equivalentSlaveBpm.toFixed(1)} BPM), kick-snapped, scheduled for t=${plan.targetOutputTime.toFixed(3)}s.`,
+        message: `DiscDJ Sync Locked on Deck ${slaveId}: Matched ${plan.familyFactor}x Tempo Family (${plan.equivalentSlaveBpm.toFixed(1)} BPM), 4-beat boundary phase aligned!`,
         type: 'success',
       });
     } else {
@@ -256,7 +256,7 @@ export default function App() {
         const isSlave = (currentMaster === 'A' && deckId === 'B') || (currentMaster === 'B' && deckId === 'A');
         const masterDeck = currentMaster === 'A' ? controllerRef.current.deckA : controllerRef.current.deckB;
         if (isSlave && masterDeck.getTelemetry().isPlaying && deck.getSync()) {
-          handleTriggerVdj8Sync();
+          handleTriggerVdj8Sync(deckId);
         } else {
           deck.play();
         }
@@ -291,11 +291,11 @@ export default function App() {
         // Will try to fetch 'dembow-loop.mp3' from public directory
         track = await fetchInbuiltLoopFromUrl(controller.audioCtx, loopDef, '/dembow-loop.mp3');
       } catch (err) {
-        console.error('Failed to load custom dembow loop, falling back to synthetic:', err);
+        console.info('Using synthesized Dembow loop (custom mp3 not found):', err instanceof Error ? err.message : err);
         track = buildInbuiltLoopTrack(controller.audioCtx, loopDef);
         setSyncAlert({
-          message: 'Could not find /dembow-loop.mp3 in public folder. Using synthesized version.',
-          type: 'warning',
+          message: 'Using synthesized Dembow loop (96 BPM).',
+          type: 'success',
         });
       }
     } else {
@@ -616,7 +616,7 @@ export default function App() {
               isMaster={masterDeckId === 'A'}
               onPlayPause={() => handlePlayPause('A')}
               onCue={() => handleCue('A')}
-              onSync={handleTriggerVdj8Sync}
+              onSync={() => handleTriggerVdj8Sync('A')}
               onSeek={(s) => handleSeek('A', s)}
               onPitchChange={(pct) => handlePitchChange('A', pct)}
               onJogNudge={(n) => handleJogNudge('A', n)}
@@ -630,7 +630,7 @@ export default function App() {
               telemetry={telemetryA}
               onPlayPause={() => handlePlayPause('A')}
               onCue={() => handleCue('A')}
-              onSync={handleTriggerVdj8Sync}
+              onSync={() => handleTriggerVdj8Sync('A')}
               onSeek={(s) => handleSeek('A', s)}
               tempoFamilyLock={null}
               onFileUpload={(f) => handleFileUpload('A', f)}
@@ -648,7 +648,7 @@ export default function App() {
               isMaster={masterDeckId === 'B'}
               onPlayPause={() => handlePlayPause('B')}
               onCue={() => handleCue('B')}
-              onSync={handleTriggerVdj8Sync}
+              onSync={() => handleTriggerVdj8Sync('B')}
               onSeek={(s) => handleSeek('B', s)}
               onPitchChange={(pct) => handlePitchChange('B', pct)}
               onJogNudge={(n) => handleJogNudge('B', n)}
@@ -662,7 +662,7 @@ export default function App() {
               telemetry={telemetryB}
               onPlayPause={() => handlePlayPause('B')}
               onCue={() => handleCue('B')}
-              onSync={handleTriggerVdj8Sync}
+              onSync={() => handleTriggerVdj8Sync('B')}
               onSeek={(s) => handleSeek('B', s)}
               tempoFamilyLock={null}
               onFileUpload={(f) => handleFileUpload('B', f)}

@@ -199,6 +199,10 @@ export class AudioLooperEngine {
     };
   }
 
+  public getLoopDeck(): BeatLoopDeck {
+    return this.loopDeck;
+  }
+
   public syncToMaster(
     masterId: 'A' | 'B',
     masterDeck: DjDeck
@@ -292,20 +296,22 @@ export class AudioLooperEngine {
     const masterTel = masterDeck.getTelemetry();
     if (!masterTel.isPlaying) return;
     
+    masterDeck.updateCurrentPosition();
+    this.loopDeck.updateCurrentPosition();
+
     const masterEffectiveBpm = masterTel.effectiveBpm > 20 ? masterTel.effectiveBpm : masterTrack.bpm;
     
-    // Strict Lock: Do not wobble the phase. Calculate base exact multiplier required for tempo match.
+    // Strict Lock: Calculate base exact multiplier required for tempo match.
     const baseTargetMultiplier = masterEffectiveBpm / (this.loopTrack.bpm || 120);
     const bakedMultiplier = this.loopDeck.getBaseTempoMultiplier();
     
-    if (bakedMultiplier > 0) {
-       const dynamicRatio = baseTargetMultiplier / bakedMultiplier;
-       
-       // Only apply the dynamic rate change if the Master deck's core tempo changed 
-       // (e.g. user moved the pitch slider). Ignore microscopic jitter.
-       if (Math.abs(dynamicRatio - this.loopDeck.getDynamicRate()) > 0.0001) {
-           this.loopDeck.setDynamicPlaybackRate(dynamicRatio);
-       }
+    if (bakedMultiplier <= 0) return;
+    const baseRatio = baseTargetMultiplier / bakedMultiplier;
+
+    // RESTORE: Stable baseline looper does not run a continuous PLL.
+    // It only ensures the base tempo multiplier remains correct if the master changes.
+    if (Math.abs(baseRatio - this.loopDeck.getDynamicRate()) > 0.0001) {
+      this.loopDeck.setDynamicPlaybackRate(baseRatio);
     }
   }
 }

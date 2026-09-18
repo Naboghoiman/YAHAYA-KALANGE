@@ -183,7 +183,7 @@ export class MasavuPhaseController {
       }
     }
 
-    // 1. Calculate beat positions
+    // 1. Calculate phase error: slaveBeatTime - masterBeatTime wrapped to [-0.5 beat, +0.5 beat]
     const masterSamplesPerBeat = masterGrid.samplesPerBeat > 0 ? masterGrid.samplesPerBeat : 22050;
     const slaveSamplesPerBeat = slaveGrid.samplesPerBeat > 0 ? slaveGrid.samplesPerBeat : 22050;
 
@@ -193,13 +193,11 @@ export class MasavuPhaseController {
     const masterBeatFloat = (masterCurrentSample - masterAnchor) / masterSamplesPerBeat;
     const slaveBeatFloat = (slaveCurrentSample - slaveAnchor) / slaveSamplesPerBeat;
 
-    // 1 & 2. Calculate phase error: slaveBeatTime - masterBeatTime wrapped to [-0.5 beat, +0.5 beat]
     const rawBeatError = slaveBeatFloat - masterBeatFloat;
     const wrappedBeatError = rawBeatError - Math.round(rawBeatError);
 
     const masterBeatPeriodSec = 60 / masterBpm;
     const masterBeatPeriodMs = masterBeatPeriodSec * 1000;
-
     const gridPhaseErrorMs = wrappedBeatError * masterBeatPeriodMs;
 
     if (params.desiredGrooveOffsetMs !== undefined) {
@@ -232,11 +230,11 @@ export class MasavuPhaseController {
       }
     }
 
-    // 3. DEADBAND: abs(error) <= 0.5 ms
+    // 3. DEADBAND: abs(error) <= 10 ms
     // = LOCKED
     // = correction 0
     // = PLL multiplier exactly 1.000000
-    if (absErrorMs <= 0.5) {
+    if (absErrorMs <= 10.0) {
       this.syncState = 'LOCKED';
       this.numberOfPersistentBadBeats = 0;
       this.integralAccumulator = 0.0; // Rule 8: clear integral inside deadband
@@ -286,7 +284,7 @@ export class MasavuPhaseController {
         this.numberOfPersistentBadBeats = 0;
 
         try {
-          onScheduleReanchor();
+          // onScheduleReanchor(); // RESTORE: NO AUTOMATIC RE-ANCHOR
         } catch (err) {
           console.warn('MasavuPhaseController reanchor error:', err);
         }
@@ -367,19 +365,19 @@ export class MasavuPhaseController {
     // slave early (phaseErrorMs > 0) -> temporarily slow slave down (negative correction)
     const sign = phaseErrorMs < 0 ? 1 : -1;
 
-    let maxRateLimit = 0.02; // Small error limit: 2%
-    let spreadBeats = 1.0;     // Spread over 1 beat
+    let maxRateLimit = 0.006; // Small error limit: 0.6%
+    let spreadBeats = 2.0;     // Spread over 2 beats
 
-    if (absErrorMs > 35.0 && absErrorMs <= 100.0) {
-      // 5. MEDIUM ERROR: 35–100 ms
-      // Maximum temporary rate correction = ±4.0%
-      maxRateLimit = 0.040;
-      spreadBeats = 1.5;
+    if (absErrorMs > 35.0 && absErrorMs <= 80.0) {
+      // 5. MEDIUM ERROR: 35–80 ms
+      // Maximum temporary rate correction = ±1.0%
+      maxRateLimit = 0.010;
+      spreadBeats = 2.0;
     } else {
-      // 4. SMALL ERROR: 2.5–35 ms
-      // Maximum correction = ±2.0%
-      maxRateLimit = 0.020;
-      spreadBeats = 1.0;
+      // 4. SMALL ERROR: 10–35 ms
+      // Maximum correction = ±0.6%
+      maxRateLimit = 0.006;
+      spreadBeats = 2.0;
     }
 
     // 8. INTEGRAL PROTECTION:
@@ -403,7 +401,10 @@ export class MasavuPhaseController {
     this.currentCorrectionRate = Math.max(-maxRateLimit, Math.min(maxRateLimit, this.currentCorrectionRate));
 
     this.syncState = 'CORRECTING';
-    const pllMultiplier = 1.0 + this.currentCorrectionRate;
+    
+    // RESTORE: phase controller telemetry only. 
+    // The pllMultiplier MUST be exactly 1.0 to respect the "no continuous auto-nudge" rule.
+    const pllMultiplier = 1.0;
 
     return {
       pllMultiplier,
