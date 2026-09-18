@@ -147,116 +147,110 @@ export class Vdj8StyleSyncEngine {
     slaveIsPlaying: boolean;
     quantizeMode?: 'beat' | 'bar';
   }): Vdj8StyleLaunchPlan {
-    const {
-      audioContextCurrentTime,
-      outputSampleRate,
-      masterTrack,
-      slaveTrack,
-      masterCurrentSourceSample,
-      slaveCurrentSourceSample,
-      masterEffectiveBpm,
-      slaveIsPlaying
-    } = params;
-
     const requestedMode = params.quantizeMode ?? 'beat';
-    const masterBpm = this.safeBpm(masterEffectiveBpm || masterTrack.bpm);
-    const slaveBpm = this.safeBpm(slaveTrack.bpm);
-    const tempo = this.matchTempoFamily(masterBpm, slaveBpm);
+    const masterGrid = params.masterTrack.beatGrid;
+    const slaveGrid = params.slaveTrack.beatGrid;
 
-    const masterGrid = this.safeGrid(masterTrack.beatGrid, masterTrack.sampleRate, masterBpm);
-    const slaveGrid = this.safeGrid(slaveTrack.beatGrid, slaveTrack.sampleRate, slaveBpm);
+    // Use only beatStartSample or discDjAnchor.beatStartSample
+    const masterAnchorSample = masterGrid.beatStartSample ?? masterGrid.discDjAnchor?.beatStartSample ?? 0;
+    const slaveAnchorSample = slaveGrid.beatStartSample ?? slaveGrid.discDjAnchor?.beatStartSample ?? 0;
 
-    const masterAnchor = masterGrid.beatStartSample ?? masterGrid.firstDownbeatSample ?? 0;
-    const masterSamplesPerBeat = masterGrid.samplesPerBeat > 0 ? masterGrid.samplesPerBeat : (masterTrack.sampleRate * 60) / masterBpm;
-    const masterBeatFloat = (masterCurrentSourceSample - masterAnchor) / masterSamplesPerBeat;
-    const masterEffectiveRate = Math.max(0.1, masterBpm / masterTrack.bpm);
-    const masterBeatsPerBar = Math.max(1, masterGrid.beatsPerBar || 4);
+    const masterOriginalBpm = params.masterTrack.bpm || 120;
+    const followerOriginalBpm = params.slaveTrack.bpm || 120;
 
-    let quantizeMode: 'beat' | 'bar' = requestedMode;
-    if (this.config.forceDownbeatForHalfDouble && tempo.familyFactor !== 1) {
-      quantizeMode = 'bar';
+    const masterSpeed = Math.max(0.01, params.masterEffectiveBpm / masterOriginalBpm);
+
+    const masterEffective = masterOriginalBpm * masterSpeed;
+    const candidates = [
+      masterEffective * 0.5,
+      masterEffective,
+      masterEffective * 2.0
+    ];
+
+    let bestCandidate = masterEffective;
+    let minDistance = Infinity;
+    let bestFactor: 0.5 | 1 | 2 = 1;
+
+    const factors: Array<0.5 | 1 | 2> = [0.5, 1, 2];
+    for (let i = 0; i < 3; i++) {
+      const candidate = candidates[i];
+      const factor = factors[i];
+      const playbackMultiplier = candidate / followerOriginalBpm;
+      const distance = Math.abs(Math.log2(playbackMultiplier));
+      if (distance < minDistance) {
+        minDistance = distance;
+        bestCandidate = candidate;
+        bestFactor = factor;
+      }
     }
 
-    let targetMasterBeatIndex = this.nextMasterTargetBeat(
-      masterBeatFloat,
-      masterSamplesPerBeat / (masterEffectiveRate * masterTrack.sampleRate),
-      masterBeatsPerBar,
-      quantizeMode
-    );
+    let targetFollowerSpeed = bestCandidate / followerOriginalBpm;
 
-    let targetMasterSample = Math.round(masterAnchor + targetMasterBeatIndex * masterSamplesPerBeat);
-    let masterNearestTransient = this.findNearestTransientToBeat(masterTrack, targetMasterSample, masterSamplesPerBeat);
-    let effectiveTargetMasterSample = masterNearestTransient !== null ? masterNearestTransient : targetMasterSample;
-    
-    let secondsUntilTarget = Math.max(0, (effectiveTargetMasterSample - masterCurrentSourceSample) / (masterEffectiveRate * masterTrack.sampleRate));
-    while (secondsUntilTarget < this.config.minLookaheadSeconds) {
-      targetMasterBeatIndex += quantizeMode === 'bar' ? masterBeatsPerBar : 1;
-      targetMasterSample = Math.round(masterAnchor + targetMasterBeatIndex * masterSamplesPerBeat);
-      masterNearestTransient = this.findNearestTransientToBeat(masterTrack, targetMasterSample, masterSamplesPerBeat);
-      effectiveTargetMasterSample = masterNearestTransient !== null ? masterNearestTransient : targetMasterSample;
-      secondsUntilTarget = Math.max(0, (effectiveTargetMasterSample - masterCurrentSourceSample) / (masterEffectiveRate * masterTrack.sampleRate));
+    if (targetFollowerSpeed < 0.5) {
+      targetFollowerSpeed *= 2;
+    }
+    if (targetFollowerSpeed > 2.0) {
+      targetFollowerSpeed /= 2;
     }
 
-    const targetOutputTime = audioContextCurrentTime + secondsUntilTarget;
-    const targetOutputFrame = Math.round(targetOutputTime * outputSampleRate);
-    const masterBeatInBar = this.mod(targetMasterBeatIndex, masterBeatsPerBar);
-    const masterBarIndex = Math.floor(targetMasterBeatIndex / masterBeatsPerBar);
+    const masterBeatPeriod = 60 / masterOriginalBpm;
+    const followerBeatPeriod = 60 / followerOriginalBpm;
 
-    // Project the slave to target time only if it is already running; otherwise
-    // preserve its current cue/read-head as the search origin.
-    const projectedSlaveSample = slaveIsPlaying
-      ? slaveCurrentSourceSample +
-        secondsUntilTarget * tempo.playbackMultiplier * slaveTrack.sampleRate
-      : slaveCurrentSourceSample;
+    const masterReal4 = (4 * masterBeatPeriod) / masterSpeed;
+    const followerReal4 = (4 * followerBeatPeriod) / targetFollowerSpeed;
 
-    const slaveReferenceBeat = this.sampleToBeat(projectedSlaveSample, slaveGrid);
-    const slaveBeatsPerBar = Math.max(1, slaveGrid.beatsPerBar || 4);
+    const commonReal4 = Math.max(masterReal4, followerReal4);
 
-    const desiredSlaveBeatInBar = quantizeMode === 'bar'
-      ? 0
-      : this.mod(masterBeatInBar, slaveBeatsPerBar);
+    const masterSourceCycle = commonReal4 * masterSpeed;
+    const followerSourceCycle = commonReal4 * targetFollowerSpeed;
 
-    const targetSlaveBeatIndex = this.closestBeatWithBarPosition(
-      slaveReferenceBeat,
-      desiredSlaveBeatInBar,
-      slaveBeatsPerBar,
-      slaveGrid.totalBeats,
-      !slaveIsPlaying
-    );
+    const masterCurrentPosition = params.masterCurrentSourceSample / params.masterTrack.sampleRate;
+    const followerCurrentPosition = params.slaveCurrentSourceSample / params.slaveTrack.sampleRate;
 
-    const selectedSlaveBeatSample = this.beatIndexToSample(targetSlaveBeatIndex, slaveGrid);
+    const masterBeatStart = masterAnchorSample / params.masterTrack.sampleRate;
+    const followerBeatStart = slaveAnchorSample / params.slaveTrack.sampleRate;
 
-    const nearestTransient = this.findNearestTransientToBeat(slaveTrack, selectedSlaveBeatSample, slaveGrid.samplesPerBeat);
-    const finalSlaveBeatIndex = targetSlaveBeatIndex;
-    let slaveSourceSample = selectedSlaveBeatSample;
-    let kickSnapped = false;
-    let kickOffsetMs = 0;
-    let desiredGrooveOffsetMs = 0;
+    const nextMasterBoundary = masterBeatStart + Math.ceil((masterCurrentPosition - masterBeatStart) / masterSourceCycle) * masterSourceCycle;
+    const nextFollowerBoundary = followerBeatStart + Math.ceil((followerCurrentPosition - followerBeatStart) / followerSourceCycle) * followerSourceCycle;
 
-    if (nearestTransient !== null) {
-      slaveSourceSample = nearestTransient;
-      kickSnapped = true;
+    const masterDelta = nextMasterBoundary - masterCurrentPosition;
+    const followerDelta = nextFollowerBoundary - followerCurrentPosition;
+
+    const followerRealRemaining = followerDelta / targetFollowerSpeed;
+    const masterRealRemaining = masterDelta / masterSpeed;
+
+    const realDifference = followerRealRemaining - masterRealRemaining;
+
+    let targetFollowerPosition = followerCurrentPosition + realDifference * targetFollowerSpeed;
+
+    // Apply the verified 0.3-cycle rule:
+    if (
+      targetFollowerPosition < followerCurrentPosition &&
+      targetFollowerPosition < followerCurrentPosition - 0.3 * followerSourceCycle
+    ) {
+      targetFollowerPosition += followerSourceCycle;
     }
 
-    // Calculate exactly what the grid phase error WILL be when these two transients are aligned
-    // so the phase controller maintains this offset instead of destroying it.
-    const slaveBeatsOffset = nearestTransient !== null 
-      ? (nearestTransient - selectedSlaveBeatSample) / slaveGrid.samplesPerBeat 
-      : 0;
-      
-    const masterBeatsOffset = masterNearestTransient !== null 
-      ? (masterNearestTransient - targetMasterSample) / masterSamplesPerBeat 
-      : 0;
+    if (targetFollowerPosition < 0) {
+      targetFollowerPosition += followerSourceCycle;
+    }
 
-    const masterBeatPeriodMs = (60 / masterBpm) * 1000;
-    kickOffsetMs = slaveBeatsOffset * masterBeatPeriodMs;
-    desiredGrooveOffsetMs = (slaveBeatsOffset - masterBeatsOffset) * masterBeatPeriodMs;
+    const secondsUntilTarget = this.config.minLookaheadSeconds;
+    const targetOutputTime = params.audioContextCurrentTime + secondsUntilTarget;
+    const targetOutputFrame = Math.round(targetOutputTime * params.outputSampleRate);
 
-    const totalLatencyFrames =
-      this.config.decoderLatencyFrames +
-      this.config.timeStretcherLatencyFrames +
-      this.config.audioBufferLatencyFrames;
-    const totalLatencySeconds = totalLatencyFrames / Math.max(1, outputSampleRate);
+    // Follower's exact target source position at targetOutputTime:
+    const targetFollowerPositionFuture = targetFollowerPosition + secondsUntilTarget * targetFollowerSpeed;
+    const slaveSourceSample = Math.max(0, Math.round(targetFollowerPositionFuture * params.slaveTrack.sampleRate));
+
+    const masterBeatFloat = (params.masterCurrentSourceSample - masterAnchorSample) / (params.masterTrack.sampleRate * masterBeatPeriod);
+    const masterBeatInBar = Math.floor(this.mod(masterBeatFloat, 4));
+    const masterBarIndex = Math.floor(masterBeatFloat / 4);
+
+    const slaveBeatFloat = targetFollowerPositionFuture / followerBeatPeriod;
+    const slaveBeatInBar = Math.floor(this.mod(slaveBeatFloat, 4));
+
+    const totalLatencySeconds = 0;
 
     return {
       targetOutputFrame,
@@ -265,24 +259,23 @@ export class Vdj8StyleSyncEngine {
       masterIsDownbeat: masterBeatInBar === 0,
       masterBarIndex,
       slaveSourceSample,
-      slaveBeatNumber: this.mod(finalSlaveBeatIndex, slaveBeatsPerBar) + 1,
-      slaveIsDownbeat: this.mod(finalSlaveBeatIndex, slaveBeatsPerBar) === 0,
-      baseTempoMultiplier: tempo.playbackMultiplier,
-      decoderLatencyFrames: this.config.decoderLatencyFrames,
-      timeStretcherLatencyFrames: this.config.timeStretcherLatencyFrames,
-      audioBufferLatencyFrames: this.config.audioBufferLatencyFrames,
+      slaveBeatNumber: slaveBeatInBar + 1,
+      slaveIsDownbeat: slaveBeatInBar === 0,
+      baseTempoMultiplier: targetFollowerSpeed,
+      decoderLatencyFrames: 0,
+      timeStretcherLatencyFrames: 0,
+      audioBufferLatencyFrames: 0,
       totalLatencySeconds,
-      prerollOutputTime: Math.max(audioContextCurrentTime, targetOutputTime - totalLatencySeconds),
-      familyFactor: tempo.familyFactor,
-      equivalentSlaveBpm: tempo.equivalentSlaveBpm,
-      targetMasterBeatIndex,
-      targetSlaveBeatIndex: finalSlaveBeatIndex,
-      selectedSlaveBeatSample,
-      kickSnapped,
-      kickOffsetMs,
-      quantizeMode,
-      grooveMatch: undefined,
-      desiredGrooveOffsetMs
+      prerollOutputTime: targetOutputTime,
+      familyFactor: bestFactor,
+      equivalentSlaveBpm: followerOriginalBpm * bestFactor,
+      targetMasterBeatIndex: Math.floor(masterBeatFloat),
+      targetSlaveBeatIndex: Math.floor(slaveBeatFloat),
+      selectedSlaveBeatSample: slaveSourceSample,
+      kickSnapped: false,
+      kickOffsetMs: 0,
+      quantizeMode: requestedMode,
+      desiredGrooveOffsetMs: 0
     };
   }
 

@@ -220,13 +220,13 @@ export default function App() {
   // TRIGGER CLEAN-ROOM DISCDJ SYNC
   const handleTriggerVdj8Sync = useCallback((_targetDeckId?: 'A' | 'B') => {
     if (!controllerRef.current) return;
-    const plan = controllerRef.current.triggerBeatPerfectSlaveStart(quantizeMode) as Vdj8StyleLaunchPlan | null;
+    const targetDeckId = _targetDeckId ?? (controllerRef.current.getMasterDeckId() === 'A' ? 'B' : 'A');
+    const plan = controllerRef.current.triggerBeatPerfectSlaveStartForDeck(targetDeckId, quantizeMode) as Vdj8StyleLaunchPlan | null;
 
     if (plan) {
       setLastPlan(plan);
-      const slaveId = _targetDeckId ?? (controllerRef.current.getMasterDeckId() === 'A' ? 'B' : 'A');
       setSyncAlert({
-        message: `DiscDJ Sync Locked on Deck ${slaveId}: Matched ${plan.familyFactor}x Tempo Family (${plan.equivalentSlaveBpm.toFixed(1)} BPM), 4-beat boundary phase aligned!`,
+        message: `DiscDJ Sync Locked on Deck ${targetDeckId}: Matched ${plan.familyFactor}x Tempo Family (${plan.equivalentSlaveBpm.toFixed(1)} BPM), 4-beat boundary phase aligned!`,
         type: 'success',
       });
     } else {

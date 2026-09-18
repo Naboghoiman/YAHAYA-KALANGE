@@ -65,14 +65,14 @@ export class DjMasterController extends BaseDjMasterController {
   }
 
   /**
-   * MASAVU trigger: starts slave at future master beat using VDJ8-style plan.
+   * Starts target deck (follower) aligned to opposite deck (reference/master).
    */
-  public override triggerBeatPerfectSlaveStart(
+  public triggerBeatPerfectSlaveStartForDeck(
+    targetDeckId: 'A' | 'B',
     quantizeMode: 'beat' | 'bar' = 'beat'
   ): SlaveStartPlan | null {
-    const masterDeckId = this.getMasterDeckId();
-    const slaveDeck = masterDeckId === 'A' ? this.deckB : this.deckA;
-    const masterDeck = masterDeckId === 'A' ? this.deckA : this.deckB;
+    const slaveDeck = targetDeckId === 'A' ? this.deckA : this.deckB;
+    const masterDeck = targetDeckId === 'A' ? this.deckB : this.deckA;
 
     const masterTrack = masterDeck.getTrack();
     const slaveTrack = slaveDeck.getTrack();
@@ -107,6 +107,17 @@ export class DjMasterController extends BaseDjMasterController {
     this.masavuPhaseController.setDesiredGrooveOffsetMs(plan.desiredGrooveOffsetMs ?? 0);
 
     return plan;
+  }
+
+  /**
+   * MASAVU trigger: starts slave at future master beat using VDJ8-style plan.
+   */
+  public override triggerBeatPerfectSlaveStart(
+    quantizeMode: 'beat' | 'bar' = 'beat'
+  ): SlaveStartPlan | null {
+    const masterDeckId = this.getMasterDeckId();
+    const targetDeckId = masterDeckId === 'A' ? 'B' : 'A';
+    return this.triggerBeatPerfectSlaveStartForDeck(targetDeckId, quantizeMode);
   }
 
   public updatePhaseController(): MasavuPhaseTelemetry {

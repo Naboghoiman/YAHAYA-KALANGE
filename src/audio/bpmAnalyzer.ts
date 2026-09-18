@@ -194,7 +194,7 @@ export function analyzeAudioBufferBpm(
     refinedLag = (envelopeSampleRate * 60) / rawBpm;
   }
 
-  const preciseBpm = Math.round(rawBpm * 100) / 100;
+  const preciseBpm = rawBpm;
   const samplesPerBeat = (sampleRate * 60) / preciseBpm;
 
   // 7. DiscDJ-style Canonical Beat Phase Anchor Calculation
